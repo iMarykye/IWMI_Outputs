@@ -1,0 +1,238 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var regbound = ee.FeatureCollection("users/mamponsah91/Gh_Regional_Boundary"),
+    image = ee.Image("USGS/SRTMGL1_003"),
+    reservoir_ppt = ee.FeatureCollection("users/mamponsah91/NW_Reservoirs4RE"),
+    hydrosheds = ee.Image("WWF/HydroSHEDS/03VFDEM"),
+    imageCollection = ee.ImageCollection("COPERNICUS/S2_SR"),
+    geometry = 
+    /* color: #d63000 */
+    /* shown: false */
+    ee.Geometry.MultiPolygon(
+        [[[[-0.8041032318842323, 10.399101066631294],
+           [-0.8041032318842323, 10.389392516877644],
+           [-0.7926019196283729, 10.389392516877644],
+           [-0.7926019196283729, 10.399101066631294]]],
+         [[[-0.7833858935149962, 10.384437756894235],
+           [-0.7833858935149962, 10.366032604359944],
+           [-0.7623573748382384, 10.366032604359944],
+           [-0.7623573748382384, 10.384437756894235]]],
+         [[[-0.7301574996620985, 10.367329837819936],
+           [-0.7301574996620985, 10.353314237726952],
+           [-0.7152229598671767, 10.353314237726952],
+           [-0.7152229598671767, 10.367329837819936]]],
+         [[[-0.561274957611797, 10.416517632090786],
+           [-0.561274957611797, 10.40723171771549],
+           [-0.553035211518047, 10.40723171771549],
+           [-0.553035211518047, 10.416517632090786]]],
+         [[[-0.3890225733499397, 10.53798714007276],
+           [-0.3890225733499397, 10.525835740280986],
+           [-0.375632985947596, 10.525835740280986],
+           [-0.375632985947596, 10.53798714007276]]],
+         [[[0.20159478473885883, 10.19841168379972],
+           [0.20159478473885883, 10.179488809837338],
+           [0.21876092243417133, 10.179488809837338],
+           [0.21876092243417133, 10.19841168379972]]],
+         [[[0.28901996507600725, 10.147644751267043],
+           [0.28901996507600725, 10.141392575260731],
+           [0.2970880497928041, 10.141392575260731],
+           [0.2970880497928041, 10.147644751267043]]],
+         [[[0.32790950086192705, 10.060468768222798],
+           [0.32790950086192705, 10.050496322126897],
+           [0.33820918347911455, 10.050496322126897],
+           [0.33820918347911455, 10.060468768222798]]]], null, false),
+    Dams = ee.FeatureCollection("users/mamponsah91/Dams_Boundary");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+//// Generate region of interest 
+var region = regbound.filter(ee.Filter.eq('REGION', 'NORTH EAST'));
+
+Map.setCenter(-0.68, 10.39, 12);
+var geometry = geometry;
+
+////  Defining date 
+var start_date = '2022-01-01';
+var end_date = '2022-01-31';
+
+
+//// Function to mask clouds using the Sentinel-2 QA band
+function maskCloudAndShadowsSR(image) {
+  var qa = image.select('QA60');
+
+   // cloud shadow
+  var scl = image.select('SCL'); 
+  var cloudBitMask = 1 << 5;     
+  var shadowBitMask = 1 << 3;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = scl.bitwiseAnd(cloudBitMask).eq(0)
+      .and(scl.bitwiseAnd(shadowBitMask).eq(0));
+  
+  return image.updateMask(mask).divide(10000);
+}
+
+
+//// Build the collection, filtered by date, bounds and percentage of cloud cover,median of dry seasons
+var S2_Image = ee.ImageCollection("COPERNICUS/S2_SR")
+                  .filterDate(start_date, end_date)
+                  .filterBounds(region) 
+                  .map(maskCloudAndShadowsSR)        
+                 
+print(S2_Image)
+
+//// Visualization parameters
+var rgbVis = {
+  min: 0.066,
+  max: 0.335,
+  bands: ['B4', 'B3', 'B2'],
+};
+Map.addLayer(S2_Image, rgbVis, 'S2 Image RGB');
+
+/// Bounding box around dams of interest
+var empty = ee.Image().byte()
+var damboundary = empty.paint(geometry, 1, 2)
+Map.addLayer(damboundary, {color: 'blue'}, 'geometry', false) 
+
+/// Clipping image collection to dams of interest
+var damBound_img = S2_Image.map(function(img){return img.clip(geometry)});
+
+
+// Modified Normalized Difference Vegetation Index (MNDWI)
+var mndwi = damBound_img.map(function(i){return i.normalizedDifference(['B3', 'B11']).rename('mndwi')});
+print(mndwi)
+Map.addLayer(mndwi, {}, 'MNDWI', false)
+
+//Classifying water surfaces using the MNDWI values
+var threshold = -0.13
+var mndwi_classified = mndwi.map(function(i){return i
+  .where(i.gte(threshold), 1)
+  .where(i.lt(threshold), 0)
+})
+
+print('mndwi_classified', mndwi_classified)
+Map.addLayer(mndwi_classified.map(function(i){return i.selfMask()}), {palette: '#1bfff4'},'mndwi_classification', false) 
+
+/// Getting most occuring water values within time period
+var water_occurrance = mndwi_classified.mode(); 
+var MaxWaterOccurance = water_occurrance.clip(Dams);
+Map.addLayer(MaxWaterOccurance.selfMask(), {palette: '#1653ff'},'water_occurrance', false)
+
+////   Function to generate river mask
+var global_watermask = ee.ImageCollection('projects/sat-io/open-datasets/GRWL/water_mask_v01_01');
+                 
+function clp(img) {
+  return img.clip(geometry);
+}
+var rivermask = global_watermask.map(clp).mosaic();
+Map.addLayer(rivermask, {'min':11,'max':125,palette:['red']},'GRWL River Mask',false)
+
+//// Buffer around river bodies 
+var riverbuffer = ee.Image(1)
+    .cumulativeCost({
+      source: rivermask, 
+      maxDistance: 100,
+    }).lt(100);
+
+Map.addLayer(riverbuffer.mask(riverbuffer), {min: 0, max: 100, palette: ['red']}, 'River_buffer', false);
+
+
+///  Mask out river bodies from water bodies
+var SmallReservoir = MaxWaterOccurance.updateMask(riverbuffer.unmask().not()).selfMask()
+Map.addLayer(SmallReservoir, {min:0 , max:1, palette:['red']}, 'Reservoirs', false);
+print(SmallReservoir,'SmallReservoir')
+
+
+/// Eliminating isolated pixels
+// Do unmask() to replace masked pixels with 0
+// This avoids extra pixels along the edges
+var reservoir = SmallReservoir.uint16()
+var reservoir = reservoir.unmask(0)
+// Perform a morphological closing to fill holes in waterbodies
+var damProcessed = reservoir
+  .focalMax({
+    'radius':10,
+    'units': 'meters',
+    'kernelType': 'square'})
+  .focalMin({
+    'radius':10,
+    'units': 'meters',
+    'kernelType': 'square'});
+
+Map.addLayer(damProcessed.selfMask(), {min:0, max:1, palette: ['blue']}, 'Surface Water',false)    
+
+//// Converting raster to vector
+var damVector = damProcessed.select(0).reduceToVectors({
+  reducer: ee.Reducer.countEvery(),
+  geometry: geometry,
+  geometryType:'polygon',
+  scale: 10,
+  maxPixels: 1e10,
+  eightConnected: false
+})
+
+Map.addLayer(damVector,{color: 'blue'}, 'Surface Water Polygons')    
+
+/// Panels for visualization
+var mainPanel = ui.Panel({
+  style: {width: '300px'}
+});
+
+var areaLabel = ui.Label();
+
+
+var title = ui.Label({
+  value: 'DAMS AND THEIR AREAS',
+  style: {'fontSize': '24px'}
+});
+
+// You can add widgets to the panel
+mainPanel.add(title)
+
+var damNames = Dams.aggregate_array('Dam_Name');
+
+var dropDown = ui.Select({
+  placeholder: 'Select a Dam',
+  items: damNames.getInfo(),
+  onChange: function(value){
+    //Map.clear()
+    var selected = Dams
+        .filter(ee.Filter.eq('Dam_Name', value))
+        .first();
+      print(value)
+      
+    var selectedDam = SmallReservoir.clip(selected);
+    var damArea = selectedDam
+      .multiply(ee.Image.pixelArea())
+      .reduceRegion({
+        reducer: ee.Reducer.sum(),
+        geometry: geometry,
+        scale: 10,
+        maxPixels: 1e9
+        });
+    print(damArea)
+    var Area = ee.Number(damArea.get('mndwi')).divide(10000).round();
+    Area.evaluate(function(result) {
+      var text = 'Dam Area : ' + result + ' Hectares'
+      areaLabel.setValue(text)
+    })
+    Map.centerObject(selected);
+    }
+});
+
+var damLabel = ui.Label({
+  value: 'Select a Dam:',
+  style: {'fontSize': '18px'}
+});
+
+  //var display = function
+var damTitles = ui.Panel(
+                [damLabel,
+                dropDown],
+              ui.Panel.Layout.Flow('horizontal'),
+      {stretch: 'horizontal'})
+  
+mainPanel.add(damTitles)
+mainPanel.add(areaLabel)
+//})
+
+//mainPanel.add(dropMonths)
+ui.root.add(mainPanel);
+
